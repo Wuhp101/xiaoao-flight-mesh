@@ -1,0 +1,13 @@
+services:
+  flight-mesh:
+    build: ../..
+    restart: unless-stopped
+    init: true
+    shm_size: 1gb
+    environment:
+      FLIGHT_MESH_NODE: oracle-free-vm
+      FLIGHT_MESH_TOKEN: ${FLIGHT_MESH_TOKEN:?set FLIGHT_MESH_TOKEN in .env}
+      FLIGHT_MESH_PROVIDERS: ${FLIGHT_MESH_PROVIDERS:-fast-flights,skyscanner,trip,kayak,expedia}
+      FLIGHT_MESH_PORT: 8789
+    ports:
+      - "127.0.0.1:8789:8789"
