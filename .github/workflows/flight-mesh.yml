@@ -1,0 +1,49 @@
+name: Xiaoao flight mesh scan
+
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xiaoao-flight-mesh
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Validate open-source mesh
+        run: python -m unittest discover -s tests -v
+      - name: Check whether the private ingest bridge is configured
+        id: bridge
+        env:
+          FLIGHT_MESH_TOKEN: ${{ secrets.FLIGHT_MESH_TOKEN }}
+          FLIGHT_MESH_JOB_URL: ${{ secrets.FLIGHT_MESH_JOB_URL }}
+        run: |
+          if [ -n "$FLIGHT_MESH_TOKEN" ] && [ -n "$FLIGHT_MESH_JOB_URL" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Mesh code is healthy; scheduled price scans stay idle until the private bridge is configured."
+          fi
+      - if: steps.bridge.outputs.ready == 'true'
+        run: pip install -r requirements.txt
+      - if: steps.bridge.outputs.ready == 'true'
+        run: python -m playwright install --with-deps chromium
+      - name: Run configured search batch
+        if: steps.bridge.outputs.ready == 'true'
+        env:
+          FLIGHT_MESH_TOKEN: ${{ secrets.FLIGHT_MESH_TOKEN }}
+          FLIGHT_MESH_JOB_URL: ${{ secrets.FLIGHT_MESH_JOB_URL }}
+        run: python -m xiaoao_mesh.workflow
