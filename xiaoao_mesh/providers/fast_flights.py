@@ -82,5 +82,7 @@ class FastFlightsProvider:
                 source_url="https://www.google.com/travel/flights",
                 price_scope="unknown",
                 tax_included=False,
+                passenger_count=query["adults"] + query["children"],
+                checked_bags=query["checkedBags"],
             ))
         return output

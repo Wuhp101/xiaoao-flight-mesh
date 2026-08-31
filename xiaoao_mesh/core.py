@@ -41,11 +41,14 @@ def result(
     arrival_time: str = "", duration_text: str = "", stops: int | None = None,
     price: float | int | None = None, source_url: str = "",
     price_scope: str = "unknown", tax_included: bool = False,
+    passenger_count: int | None = None, checked_bags: int = 0,
+    bookable: bool = False, airline_code: str = "",
 ) -> dict[str, Any]:
     return {
         "provider": provider,
         "source": provider,
         "airline": airline,
+        "airlineCode": airline_code,
         "departureTime": departure_time,
         "arrivalTime": arrival_time,
         "durationText": duration_text,
@@ -53,6 +56,9 @@ def result(
         "price": price,
         "priceScope": price_scope,
         "taxIncluded": tax_included,
+        "passengerCount": passenger_count,
+        "checkedBags": checked_bags,
+        "bookable": bookable,
         "sourceUrl": source_url,
     }
 

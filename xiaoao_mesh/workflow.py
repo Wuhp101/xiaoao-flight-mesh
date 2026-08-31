@@ -6,6 +6,7 @@ import os
 import urllib.request
 
 from .server import search_batch
+from .planner import scan_page
 
 
 def request_json(url: str, token: str, data: dict | None = None) -> dict:
@@ -24,10 +25,21 @@ def main() -> None:
     token = os.environ["FLIGHT_MESH_TOKEN"]
     job = request_json(job_url, token)
     searches = job.get("searches", [])
+    plan_state = None
+    if not searches and isinstance(job.get("plan"), dict):
+        plan_state = scan_page(
+            job["plan"], cursor=int(job.get("cursor") or 0),
+            limit=int(job.get("limit") or os.getenv("FLIGHT_MESH_MAX_SEARCHES", "12")),
+            completed_keys=job.get("completedKeys") or [],
+            priority_keys=job.get("priorityKeys") or [],
+        )
+        searches = plan_state["queries"]
     if not searches:
         print("No pending flight searches.")
         return
     result = asyncio.run(search_batch(searches))
+    if plan_state:
+        result["dateMatrix"] = {key: value for key, value in plan_state.items() if key != "queries"}
     ingest_url = job.get("ingestUrl")
     if not ingest_url:
         raise RuntimeError("job response did not include ingestUrl")

@@ -1,50 +1,95 @@
 # Xiaoao Flight Mesh
 
-MIT 授權的可攜式機票掃描節點。相同映像可跑在 NAS、公開 GitHub Actions
-標準執行器、Oracle Always Free VM，並由現有 Cloudflare Worker 依序容錯。
+小澳機票的可攜式搜尋節點。相同映像可跑在 Synology NAS、GitHub Actions
+或一般 Linux，搜尋結果再由既有 Cloudflare Worker 匯入家庭機票雷達。
 
-## 來源
+## v1 神價搜尋原則
 
-- `fast-flights`：MIT 專案，直接讀取 Google Flights 公開回應，不開瀏覽器。
-- `skyscanner`、`trip`、`kayak`、`expedia`：用 Playwright 讀取公開搜尋頁的 HKD 參考價。
+「掃過目的地」不等於「掃過日期」。引擎會把假期展開成完整日期矩陣，再以
+可續跑的 cursor 分批處理。例如 2026-12-19 至 12-27、旅程 4–8 天共有
+15 組合法日期；49 個目的地 × 4 個出發地 × 3 個艙等就是 8,820 組，
+而不是只抽一組日期後宣稱完成。
 
-瀏覽器來源只使用一般公開頁面；遇到 CAPTCHA、人機驗證或存取拒絕時立即停止該來源，
-不繞過網站保護。來源頁結構與價格範圍隨時可能改變，因此所有結果都只標示為參考價，
-仍須在航空公司官網或 OTA 核對含稅、行李與退改條款。
+- 第一輪先讓每個目的地都取得一個日期觀察，之後持續補齊日期矩陣。
+- 候選／比較中的行程可插隊複驗，但不會因此永遠跳過其他日期。
+- 只有「相同旅客數、三人總價、含稅」才可進入價格比較。
+- 快照只供即時顯示；標記為 snapshot，不能觸發神價通知。
+- 至少五筆同類歷史才能判斷歷史低位；神價還必須在 15 分鐘內由兩個
+  獨立來源支持，或由可購買的 live-offer API 確認。
+- 來源價差超過 8% 會隔離為衝突，不會選較便宜的一筆偷偷通知。
+
+## 價格來源
+
+預設順序：
+
+1. `google-playwright`：NAS Chromium 讀取 Google Flights 明確標示的
+   航班結果卡，確認頁面顯示的旅客數後才把價格標成 family。
+2. `serpapi-google-flights`：選填的獨立結構化來源。只有設定
+   `SERPAPI_KEY` 才啟用。
+3. `fast-flights`：速度快的補充來源；未能證實含稅家庭總價時只作線索，
+   不可單獨觸發通知。
+
+舊版 Skyscanner／Trip／Kayak／Expedia 公開頁「抓取頁面所有 HK$ 數字」
+已退出預設鏈路。那種資料無法證明金額屬於哪一班、幾位旅客或是否含稅，
+寧可少一筆，也不製造漂亮但不能買的假神價。
+
+瀏覽器來源遇到 CAPTCHA、人機驗證或存取拒絕時會立即停止，不繞過網站保護。
+單一來源連續失敗三次會暫停 30 分鐘；健康狀態可在 `/health` 稽核。
 
 ## NAS / 一般 Linux
 
-1. 複製 `.env.example` 為 `.env` 並放入長隨機字串。
+1. 複製 `.env.example` 為 `.env`，設定至少 32 字元的
+   `FLIGHT_MESH_TOKEN`。
 2. 執行 `docker compose up -d --build`。
-3. 只把 `127.0.0.1:8789` 接到既有 Cloudflare Tunnel，不要直接公開此連接埠。
+3. 只把 `127.0.0.1:8789` 接到既有 Cloudflare Tunnel，不要公開連接埠。
 
-健康檢查不含秘密：`GET /health`。搜尋使用 `POST /search-batch` 並要求
-`Authorization: Bearer <FLIGHT_MESH_TOKEN>`。
+SQLite 快照保存在 Docker volume `flight-mesh-data`，重新部署不會清空。
 
-## 節點矩陣
+## API
 
-| 節點 | 狀態 | 用途 |
-|---|---|---|
-| NAS Docker | 本目錄 `docker-compose.yml` | 首選自架節點，持續運作 |
-| GitHub Actions | `.github/workflows/flight-mesh.yml` | 公開 repo 的排程／手動備援 |
-| Oracle VM | `deploy/oracle/docker-compose.yml` | 免費 VM 的第二個自架地點 |
-| Cloudflare Browser | 既有 `xiaoao-flight-browser` | 最後的 Google 瀏覽器備援 |
+健康檢查（不含秘密）：
 
-GitHub 與 Oracle 都需要各平台帳戶先建立 runner/VM；程式不會假裝已取得不存在的帳戶權限。
-Cloud Run 需要啟用計費，因此不列入「絕不付費」自動鏈。
+```
+GET /health
+```
 
-公開倉庫不保存任何 Token。未設定 Actions Secrets 時，排程只執行健康測試並安全閒置；
-設定 `FLIGHT_MESH_JOB_URL` 與 `FLIGHT_MESH_TOKEN` 後才會取出私人搜尋工作並回傳結果。
-
-## 介面
+建立完整日期矩陣的一頁：
 
 ```json
+POST /plan
+Authorization: Bearer <token>
+
+{
+  "plan": {
+    "holidayStart": "2026-12-19",
+    "holidayEnd": "2026-12-27",
+    "minDays": 4,
+    "maxDays": 8,
+    "origins": ["HKG", "MFM", "CAN", "SZX"],
+    "destinations": ["ICN", "KIX"],
+    "cabins": ["economy", "business"],
+    "adults": 2,
+    "children": 1
+  },
+  "cursor": 0,
+  "limit": 12,
+  "completedKeys": [],
+  "priorityKeys": []
+}
+```
+
+搜尋一批精確行程：
+
+```json
+POST /search-batch
+Authorization: Bearer <token>
+
 {
   "searches": [{
     "origin": "HKG",
     "destination": "KUL",
-    "outboundDate": "2026-12-16",
-    "returnDate": "2026-12-27",
+    "outboundDate": "2026-12-19",
+    "returnDate": "2026-12-25",
     "cabin": "economy",
     "adults": 2,
     "children": 1,
@@ -53,4 +98,16 @@ Cloud Run 需要啟用計費，因此不列入「絕不付費」自動鏈。
 }
 ```
 
-每個來源獨立失敗，回應保留成功結果及 `failures`；整批不會因單一 OTA 改版而中止。
+每個來源獨立失敗；整批保留成功結果與 `failures`。全部 live source
+暫時失敗時，可回傳 72 小時內的 last-known-good snapshot，但它不算驗價。
+
+## 驗證
+
+```bash
+PYTHONPATH=. python -m unittest discover -s tests -v
+python -m py_compile xiaoao_mesh/*.py xiaoao_mesh/providers/*.py
+```
+
+GitHub Actions 沒有設定私人 bridge secrets 時只跑測試並安全閒置；公開倉庫
+不保存 token 或 API key。
+

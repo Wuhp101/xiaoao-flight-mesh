@@ -6,11 +6,17 @@ services:
     shm_size: 1gb
     environment:
       FLIGHT_MESH_TOKEN: ${FLIGHT_MESH_TOKEN:?set FLIGHT_MESH_TOKEN in .env}
-      FLIGHT_MESH_PROVIDERS: ${FLIGHT_MESH_PROVIDERS:-fast-flights,skyscanner,trip,kayak,expedia}
+      FLIGHT_MESH_PROVIDERS: ${FLIGHT_MESH_PROVIDERS:-google-playwright,serpapi-google-flights,fast-flights}
       FLIGHT_MESH_HOST: 0.0.0.0
       FLIGHT_MESH_PORT: 8789
       FLIGHT_MESH_BROWSER_TIMEOUT_MS: ${FLIGHT_MESH_BROWSER_TIMEOUT_MS:-45000}
+      FLIGHT_MESH_BROWSER_PAGES: ${FLIGHT_MESH_BROWSER_PAGES:-2}
+      FLIGHT_MESH_QUERY_CONCURRENCY: ${FLIGHT_MESH_QUERY_CONCURRENCY:-2}
       FLIGHT_MESH_MAX_SEARCHES: ${FLIGHT_MESH_MAX_SEARCHES:-12}
+      FLIGHT_MESH_SNAPSHOT_DB: /data/flight-mesh.sqlite3
+      SERPAPI_KEY: ${SERPAPI_KEY:-}
+    volumes:
+      - flight-mesh-data:/data
     ports:
       - "127.0.0.1:8789:8789"
     healthcheck:
@@ -18,3 +24,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+volumes:
+  flight-mesh-data:

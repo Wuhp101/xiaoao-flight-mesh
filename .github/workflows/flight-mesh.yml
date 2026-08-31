@@ -45,4 +45,6 @@ jobs:
         env:
           FLIGHT_MESH_TOKEN: ${{ secrets.FLIGHT_MESH_TOKEN }}
           FLIGHT_MESH_JOB_URL: ${{ secrets.FLIGHT_MESH_JOB_URL }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          FLIGHT_MESH_PROVIDERS: google-playwright,serpapi-google-flights,fast-flights
         run: python -m xiaoao_mesh.workflow
