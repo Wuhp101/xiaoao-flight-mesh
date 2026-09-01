@@ -18,14 +18,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install 'fast-flights==3.1.0'
+      - run: pip install 'fast-flights==3.1.0' 'typing-extensions>=4.12'
       - name: Probe benchmark routes
         run: |
           python - <<'PY'
           import concurrent.futures
           import json
           import time
-          import traceback
           from fast_flights import FlightQuery, Passengers, create_query, get_flights
 
           pairs = [
