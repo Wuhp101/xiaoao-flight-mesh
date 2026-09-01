@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import os
@@ -66,6 +67,19 @@ def record_provider_health(name: str, ok: bool, elapsed_ms: int, error: str = ""
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def bridge_token_hash() -> str:
+    """Return a non-secret identifier for the NAS-local bearer token.
+
+    The runtime token is 256 bits of random data generated on the NAS. Exposing
+    only SHA-256(token) lets the Cloudflare bridge verify the token without ever
+    copying the bearer secret into GitHub or source control.
+    """
+    token = os.getenv("FLIGHT_MESH_TOKEN", "")
+    if len(token) < 32:
+        return ""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 async def search_fast_batch(searches: list[dict[str, Any]]) -> dict[str, Any]:
@@ -281,6 +295,7 @@ class Handler(BaseHTTPRequestHandler):
             "node": os.getenv("FLIGHT_MESH_NODE", "nas"),
             "providers": configured_provider_names(),
             "authenticated": len(os.getenv("FLIGHT_MESH_TOKEN", "")) >= 32,
+            "bridgeTokenHash": bridge_token_hash(),
             "plannerVersion": "date-matrix-v1",
             "speedEngineVersion": "v2",
             "fastConcurrency": max(2, min(32, int(os.getenv("FLIGHT_MESH_FAST_CONCURRENCY", "12")))),
