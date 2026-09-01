@@ -1,2 +1,2 @@
-fast-flights>=3.0.0,<4
+faster-flights==3.8.0
 playwright==1.62.0
