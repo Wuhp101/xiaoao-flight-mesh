@@ -8,7 +8,7 @@ import urllib.request
 from .core import clean_query
 from .planner import query_key, scan_page
 from .recovery import search_fast_recovery_batch
-from .server import search_batch, search_fast_batch
+from .server import search_batch, search_fast_batch, utc_now
 
 
 def request_json(url: str, token: str, data: dict | None = None) -> dict:
@@ -143,16 +143,32 @@ def main() -> None:
     discovery_result = merge_discovery(fast_result, recovery_result)
 
     # Wave 3: verify only the best candidates. Browser/API verification never
-    # blocks the first two discovery waves from appearing.
+    # blocks the first two discovery waves from appearing. Even when discovery
+    # found no priced candidate, send an empty verified phase so the final page
+    # can transition from `verifying` to `completed` instead of hanging forever.
     verify_limit = max(1, min(12, int(os.getenv("FLIGHT_MESH_VERIFY_CANDIDATES", "6"))))
     verify_searches = shortlist_searches(discovery_result, verify_limit)
-    verified_accepted = {"ok": True}
-    verified_result = None
     if verify_searches:
         verified_result = asyncio.run(search_batch(verify_searches))
         verified_result["phaseOf"] = "fast-discovery"
         verified_result["discoveryWave"] = 3
-        verified_accepted = request_json(ingest_url, token, verified_result)
+    else:
+        verified_result = {
+            "ok": True,
+            "mode": "verified",
+            "node": os.getenv("FLIGHT_MESH_NODE", "nas"),
+            "providers": [],
+            "fetchedAt": utc_now(),
+            "searches": [],
+            "coverage": {"requested": 0, "completed": 0, "failed": 0},
+            "providerHealth": {},
+            "snapshotsUsed": 0,
+            "failures": [],
+            "phaseOf": "fast-discovery",
+            "discoveryWave": 3,
+            "emptyTerminal": True,
+        }
+    verified_accepted = request_json(ingest_url, token, verified_result)
 
     print(json.dumps({
         "fastCoverage": fast_result["coverage"],
@@ -161,7 +177,7 @@ def main() -> None:
         "recoveryCoverage": recovery_result.get("coverage") if recovery_result else None,
         "recoveryAccepted": recovery_accepted.get("ok", False),
         "verifiedRequested": len(verify_searches),
-        "verifiedCoverage": verified_result.get("coverage") if verified_result else None,
+        "verifiedCoverage": verified_result.get("coverage"),
         "verifiedAccepted": verified_accepted.get("ok", False),
     }))
 
