@@ -11,6 +11,7 @@ from xiaoao_mesh.quality import classify_price_opportunity, comparable_family_pr
 from xiaoao_mesh.server import configured_provider_names
 import xiaoao_mesh.server as server_module
 from xiaoao_mesh.snapshots import SnapshotStore
+from xiaoao_mesh.workflow import shortlist_searches
 
 
 QUERY = {
@@ -107,6 +108,22 @@ class MeshTests(unittest.TestCase):
         self.assertTrue(offers[0]["sourceConflict"])
         self.assertEqual(offers[0]["verificationState"], "conflict")
 
+    def test_fast_hint_does_not_count_as_verified_second_source(self):
+        query = clean_query(QUERY)
+        offers = deduplicate_offers(query, [
+            {
+                "provider": "google-playwright", "airline": "長榮航空", "departureTime": "20:10",
+                "price": 7000, "priceScope": "family", "passengerCount": 3, "taxIncluded": True,
+            },
+            {
+                "provider": "fast-flights", "airline": "長榮航空", "departureTime": "20:10",
+                "price": 6950, "priceScope": "unknown", "passengerCount": 3, "taxIncluded": False,
+            },
+        ])
+        self.assertEqual(offers[0]["supportingProviders"], ["fast-flights", "google-playwright"])
+        self.assertEqual(offers[0]["verificationProviders"], ["google-playwright"])
+        self.assertEqual(offers[0]["independentSourceCount"], 1)
+
     def test_god_price_requires_history_freshness_and_two_sources(self):
         now = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
         offer = {
@@ -126,10 +143,18 @@ class MeshTests(unittest.TestCase):
             store.put(query, [{"price": 7000}], "2099-08-31T11:00:00Z")
             self.assertIsNone(store.get(query, max_age_hours=72))
 
+    def test_shortlist_spreads_verification_across_destinations_first(self):
+        def row(destination, price):
+            return {"input": {**QUERY, "destination": destination}, "results": [{"price": price}]}
+        selected = shortlist_searches({"searches": [
+            row("KIX", 1000), row("KIX", 1100), row("ICN", 1200), row("BKK", 1300)
+        ]}, 3)
+        self.assertEqual({item["destination"] for item in selected}, {"KIX", "ICN", "BKK"})
+
 
 class _FakeProvider:
-    def __init__(self, name, price=None, fail=False):
-        self.name, self.price, self.fail = name, price, fail
+    def __init__(self, name, price=None, fail=False, family=True):
+        self.name, self.price, self.fail, self.family = name, price, fail, family
 
     async def search(self, query):
         if self.fail:
@@ -137,8 +162,8 @@ class _FakeProvider:
         return [{
             "provider": self.name, "source": self.name, "airline": "長榮航空",
             "departureTime": "20:10", "price": self.price,
-            "priceScope": "family", "passengerCount": 3, "taxIncluded": True,
-            "bookable": False,
+            "priceScope": "family" if self.family else "unknown", "passengerCount": 3,
+            "taxIncluded": self.family, "bookable": False,
         }]
 
 
@@ -151,13 +176,25 @@ class ServerBatchTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.directory.cleanup()
 
-    async def test_batch_combines_independent_sources(self):
+    async def test_fast_batch_returns_candidate_without_verification(self):
+        provider = _FakeProvider("fast-flights", 6800, family=False)
+        with patch.object(server_module, "make_provider", return_value=provider):
+            response = await server_module.search_fast_batch([QUERY])
+        result = response["searches"][0]["results"][0]
+        self.assertEqual(response["mode"], "fast-discovery")
+        self.assertEqual(result["verificationState"], "candidate")
+        self.assertEqual(result["verifiedAt"], "")
+        self.assertFalse(result["godPriceEligible"])
+
+    async def test_batch_combines_two_comparable_independent_sources(self):
         providers = {
             "google-playwright": _FakeProvider("google-playwright", 7000),
-            "fast-flights": _FakeProvider("fast-flights", 7050),
+            "serpapi-google-flights": _FakeProvider("serpapi-google-flights", 7050),
         }
-        with patch.dict(os.environ, {"FLIGHT_MESH_PROVIDERS": "google-playwright,fast-flights"}), \
-                patch.object(server_module, "make_provider", side_effect=lambda name: providers[name]):
+        with patch.dict(os.environ, {
+            "FLIGHT_MESH_PROVIDERS": "google-playwright,serpapi-google-flights",
+            "SERPAPI_KEY": "test-key",
+        }), patch.object(server_module, "make_provider", side_effect=lambda name: providers[name]):
             response = await server_module.search_batch([QUERY])
         result = response["searches"][0]["results"][0]
         self.assertEqual(result["independentSourceCount"], 2)
