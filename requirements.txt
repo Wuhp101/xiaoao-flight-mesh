@@ -1,2 +1,2 @@
 fast-flights>=3.0.0,<4
-playwright>=1.55.0,<2
+playwright==1.62.0
