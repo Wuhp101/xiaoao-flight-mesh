@@ -47,7 +47,7 @@ jobs:
                   trip='round-trip' if round_trip else 'one-way',
                   seat='economy',
                   passengers=Passengers(adults=2, children=1, infants_in_seat=0, infants_on_lap=0),
-                  currency='HKD', checked_bags=0, language='zh-TW',
+                  currency='HKD', language='zh-TW',
               )
               started = time.perf_counter()
               try:
