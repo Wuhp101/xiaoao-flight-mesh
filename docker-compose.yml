@@ -28,5 +28,31 @@ services:
       timeout: 5s
       retries: 3
 
+  scan-bridge:
+    build: .
+    restart: unless-stopped
+    init: true
+    command: ["python", "-m", "xiaoao_mesh.bridge"]
+    environment:
+      FLIGHT_MESH_TOKEN: ${FLIGHT_MESH_TOKEN:?set FLIGHT_MESH_TOKEN in .env}
+      FLIGHT_MESH_JOB_URL: ${FLIGHT_MESH_JOB_URL:-https://life-tg.wuhp101.workers.dev/api/flight-scan-job?claim=1}
+      FLIGHT_MESH_FAST_CONCURRENCY: ${FLIGHT_MESH_FAST_CONCURRENCY:-12}
+      FLIGHT_MESH_FAST_MAX_SEARCHES: ${FLIGHT_MESH_FAST_MAX_SEARCHES:-60}
+      FLIGHT_MESH_VERIFY_CANDIDATES: ${FLIGHT_MESH_VERIFY_CANDIDATES:-6}
+      FLIGHT_MESH_RPC_RECOVERY_MAX_SEARCHES: ${FLIGHT_MESH_RPC_RECOVERY_MAX_SEARCHES:-12}
+      FLIGHT_MESH_RPC_RECOVERY_CONCURRENCY: ${FLIGHT_MESH_RPC_RECOVERY_CONCURRENCY:-6}
+      FLIGHT_MESH_QUERY_CONCURRENCY: ${FLIGHT_MESH_QUERY_CONCURRENCY:-4}
+      FLIGHT_MESH_MAX_SEARCHES: ${FLIGHT_MESH_MAX_SEARCHES:-12}
+      FLIGHT_MESH_BROWSER_TIMEOUT_MS: ${FLIGHT_MESH_BROWSER_TIMEOUT_MS:-45000}
+      FLIGHT_MESH_BROWSER_PAGES: ${FLIGHT_MESH_BROWSER_PAGES:-3}
+      FLIGHT_MESH_PROVIDERS: ${FLIGHT_MESH_PROVIDERS:-google-playwright,serpapi-google-flights,fast-flights}
+      FLIGHT_MESH_SNAPSHOT_DB: /data/flight-mesh.sqlite3
+      SERPAPI_KEY: ${SERPAPI_KEY:-}
+    volumes:
+      - flight-mesh-data:/data
+    depends_on:
+      flight-mesh:
+        condition: service_healthy
+
 volumes:
   flight-mesh-data:
