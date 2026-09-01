@@ -119,26 +119,23 @@ def main() -> None:
     if not ingest_url:
         raise RuntimeError("job response did not include ingestUrl")
 
-    # Wave 1: sub-second / low-second discovery. Ingest immediately so the UI
-    # can show useful candidates before any slower recovery or verification.
+    # Collect every phase locally and ingest the page once. Cloudflare KV is
+    # eventually consistent, so three rapid writes for the same job can read
+    # stale state and make the cursor move backwards.
     fast_result = asyncio.run(search_fast_batch(searches))
     fast_result["discoveryWave"] = 1
     if plan_state:
         fast_result["dateMatrix"] = {key: value for key, value in plan_state.items() if key != "queries"}
-    fast_accepted = request_json(ingest_url, token, fast_result)
 
     # Wave 2: only first-wave misses, browserless Google Shopping RPC. This can
     # be slower on some routes, but it happens after Wave 1 is already visible.
     recovery_limit = max(0, min(24, int(os.getenv("FLIGHT_MESH_RPC_RECOVERY_MAX_SEARCHES", "12"))))
     recovery_inputs = recovery_searches(searches, fast_result, recovery_limit) if recovery_limit else []
     recovery_result = None
-    recovery_accepted = {"ok": True}
     if recovery_inputs:
         recovery_result = asyncio.run(search_fast_recovery_batch(recovery_inputs))
         recovery_result["phaseOf"] = "fast-discovery"
         recovery_result["discoveryWave"] = 2
-        if recovery_result.get("searches"):
-            recovery_accepted = request_json(ingest_url, token, recovery_result)
 
     discovery_result = merge_discovery(fast_result, recovery_result)
 
@@ -168,17 +165,39 @@ def main() -> None:
             "discoveryWave": 3,
             "emptyTerminal": True,
         }
-    verified_accepted = request_json(ingest_url, token, verified_result)
+    if plan_state:
+        date_matrix = {key: value for key, value in plan_state.items() if key != "queries"}
+    else:
+        date_matrix = {
+            "cursor": 0,
+            "nextCursor": None,
+            "matrixTotal": len(searches),
+            "completed": 0,
+            "remaining": 0,
+            "datePairs": 1,
+        }
+    phases = [fast_result]
+    if recovery_result:
+        phases.append(recovery_result)
+    phases.append(verified_result)
+    page_result = {
+        "ok": True,
+        "mode": "page-batch",
+        "fetchedAt": verified_result.get("fetchedAt") or fast_result.get("fetchedAt"),
+        "coverage": fast_result.get("coverage") or {},
+        "dateMatrix": date_matrix,
+        "providerHealth": verified_result.get("providerHealth") or fast_result.get("providerHealth") or {},
+        "phases": phases,
+    }
+    page_accepted = request_json(ingest_url, token, page_result)
 
     print(json.dumps({
         "fastCoverage": fast_result["coverage"],
-        "fastAccepted": fast_accepted.get("ok", False),
         "recoveryRequested": len(recovery_inputs),
         "recoveryCoverage": recovery_result.get("coverage") if recovery_result else None,
-        "recoveryAccepted": recovery_accepted.get("ok", False),
         "verifiedRequested": len(verify_searches),
         "verifiedCoverage": verified_result.get("coverage"),
-        "verifiedAccepted": verified_accepted.get("ok", False),
+        "pageAccepted": page_accepted.get("ok", False),
     }))
 
 
