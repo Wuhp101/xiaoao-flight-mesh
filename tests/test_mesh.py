@@ -10,8 +10,9 @@ from xiaoao_mesh.providers.google_playwright import google_flights_url, parse_re
 from xiaoao_mesh.quality import classify_price_opportunity, comparable_family_price, deduplicate_offers
 from xiaoao_mesh.server import configured_provider_names
 import xiaoao_mesh.server as server_module
+import xiaoao_mesh.recovery as recovery_module
 from xiaoao_mesh.snapshots import SnapshotStore
-from xiaoao_mesh.workflow import shortlist_searches
+from xiaoao_mesh.workflow import merge_discovery, recovery_searches, shortlist_searches
 
 
 QUERY = {
@@ -151,6 +152,27 @@ class MeshTests(unittest.TestCase):
         ]}, 3)
         self.assertEqual({item["destination"] for item in selected}, {"KIX", "ICN", "BKK"})
 
+    def test_recovery_targets_first_wave_misses_and_skips_baggage(self):
+        base = {**QUERY, "checkedBags": 0}
+        searches = [
+            {**base, "origin": "HKG", "destination": "KIX"},
+            {**base, "origin": "MFM", "destination": "KIX"},
+            {**base, "origin": "SZX", "destination": "ICN"},
+            {**base, "origin": "CAN", "destination": "BKK", "checkedBags": 1},
+        ]
+        fast = {
+            "coverage": {"requested": 4},
+            "searches": [{"input": clean_query(searches[0]), "results": [{"price": 1000}]}],
+        }
+        selected = recovery_searches(searches, fast, 4)
+        self.assertEqual({(item["origin"], item["destination"]) for item in selected}, {("MFM", "KIX"), ("SZX", "ICN")})
+
+    def test_merge_discovery_keeps_primary_and_adds_new_routes(self):
+        primary = {"searches": [{"input": {**QUERY, "origin": "HKG"}, "results": [{"price": 1000}]}]}
+        recovery = {"searches": [{"input": {**QUERY, "origin": "MFM"}, "results": [{"price": 1100}]}]}
+        merged = merge_discovery(primary, recovery)
+        self.assertEqual(len(merged["searches"]), 2)
+
 
 class _FakeProvider:
     def __init__(self, name, price=None, fail=False, family=True):
@@ -165,6 +187,9 @@ class _FakeProvider:
             "priceScope": "family" if self.family else "unknown", "passengerCount": 3,
             "taxIncluded": self.family, "bookable": False,
         }]
+
+    async def search_shopping(self, query):
+        return await self.search(query)
 
 
 class ServerBatchTests(unittest.IsolatedAsyncioTestCase):
@@ -184,6 +209,17 @@ class ServerBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["mode"], "fast-discovery")
         self.assertEqual(result["verificationState"], "candidate")
         self.assertEqual(result["verifiedAt"], "")
+        self.assertFalse(result["godPriceEligible"])
+
+    async def test_recovery_batch_stays_unverified_candidate(self):
+        query = {**QUERY, "checkedBags": 0}
+        provider = _FakeProvider("fast-flights", 6500, family=False)
+        with patch.object(recovery_module, "FastFlightsProvider", return_value=provider):
+            response = await recovery_module.search_fast_recovery_batch([query])
+        result = response["searches"][0]["results"][0]
+        self.assertEqual(response["mode"], "fast-recovery")
+        self.assertEqual(result["verificationState"], "candidate")
+        self.assertEqual(result["discoveryWave"], "shopping-rpc-recovery")
         self.assertFalse(result["godPriceEligible"])
 
     async def test_batch_combines_two_comparable_independent_sources(self):
