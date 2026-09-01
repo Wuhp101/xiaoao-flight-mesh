@@ -28,16 +28,25 @@ def _price(value: Any) -> float | None:
 
 
 class FastFlightsProvider:
-    """Google Flights protobuf adapter powered by the MIT fast-flights project."""
+    """Browserless Google Flights candidate adapter.
+
+    The first pass uses faster-flights' light HTML path. A separate shopping
+    RPC method is available for background recovery of routes that the first
+    pass cannot see. Both outputs are unverified hints only.
+    """
 
     name = "fast-flights"
 
-    async def search(self, query: dict[str, Any]) -> list[dict[str, Any]]:
+    @staticmethod
+    def _imports():
         try:
-            from fast_flights import FlightQuery, Passengers, create_query, get_flights
+            from fast_flights import FlightQuery, Passengers, ShoppingOptions, create_query, get_flights
         except ImportError as error:
-            raise RuntimeError("fast-flights dependency is not installed") from error
+            raise RuntimeError("faster-flights dependency is not installed") from error
+        return FlightQuery, Passengers, ShoppingOptions, create_query, get_flights
 
+    def _request(self, query: dict[str, Any]):
+        FlightQuery, Passengers, _, create_query, _ = self._imports()
         passengers = Passengers(
             adults=query["adults"],
             children=query["children"],
@@ -48,18 +57,18 @@ class FastFlightsProvider:
             FlightQuery(date=query["outboundDate"], from_airport=query["origin"], to_airport=query["destination"]),
             FlightQuery(date=query["returnDate"], from_airport=query["destination"], to_airport=query["origin"]),
         ]
-        request = create_query(
+        return create_query(
             flights=flights,
             trip="round-trip",
             seat=query["cabin"].replace("_", "-"),
             passengers=passengers,
             currency="HKD",
-            checked_bags=query["checkedBags"],
             language="zh-TW",
         )
-        offers = await asyncio.to_thread(get_flights, request)
+
+    def _results(self, query: dict[str, Any], offers: Any) -> list[dict[str, Any]]:
         output: list[dict[str, Any]] = []
-        for offer in list(offers)[:8]:
+        for offer in list(offers or [])[:8]:
             price = _price(offer)
             if price is None:
                 continue
@@ -70,7 +79,12 @@ class FastFlightsProvider:
             arrival = _field(last_leg, "arrival", default=None)
             departure_time = _field(departure, "time", default="")
             arrival_time = _field(arrival, "time", default="")
-            format_time = lambda value: ":".join(f"{int(part):02d}" for part in value) if isinstance(value, (list, tuple)) else str(value or "")
+
+            def format_time(value: Any) -> str:
+                if isinstance(value, (list, tuple)):
+                    return ":".join(f"{int(part):02d}" for part in value)
+                return str(value or "")
+
             output.append(result(
                 provider=self.name,
                 airline="、".join(str(value) for value in (_field(offer, "airlines", default=[]) or [])),
@@ -83,6 +97,31 @@ class FastFlightsProvider:
                 price_scope="unknown",
                 tax_included=False,
                 passenger_count=query["adults"] + query["children"],
-                checked_bags=query["checkedBags"],
+                checked_bags=0,
             ))
         return output
+
+    async def search(self, query: dict[str, Any]) -> list[dict[str, Any]]:
+        # faster-flights 3.8 does not expose the old checked_bags query knob.
+        # Never pretend a browserless hint satisfies a requested baggage rule.
+        if int(query.get("checkedBags") or 0) > 0:
+            return []
+        _, _, _, _, get_flights = self._imports()
+        request = self._request(query)
+        offers = await asyncio.to_thread(get_flights, request)
+        return self._results(query, offers)
+
+    async def search_shopping(self, query: dict[str, Any]) -> list[dict[str, Any]]:
+        """Second-wave recovery using Google's shopping RPC.
+
+        This is intentionally separate from ``search`` because some routes can
+        take much longer. The workflow ingests first-pass candidates before
+        calling this method, so slow recovery never blocks the first screen.
+        """
+        if int(query.get("checkedBags") or 0) > 0:
+            return []
+        _, _, ShoppingOptions, _, get_flights = self._imports()
+        request = self._request(query)
+        shopping = ShoppingOptions(ranking_mode="cheapest", result_sort="price")
+        offers = await asyncio.to_thread(get_flights, request, shopping=shopping)
+        return self._results(query, offers)
