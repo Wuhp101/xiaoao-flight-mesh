@@ -82,17 +82,20 @@ def build_scan_matrix(plan: dict[str, Any]) -> list[dict[str, Any]]:
         "checkedBags": max(0, min(2, int(plan.get("checkedBags") or 0))),
         "currency": "HKD",
     }
-    # Route-first interleaving makes the first sweep honest: every destination
-    # receives one date observation before the second date pair is attempted.
+    # A full first sweep means one observation for every route/cabin, matching
+    # the product estimate shown in the UI (49 destinations * 4 origins *
+    # 3 cabins = 588 searches). Spread the valid date pairs across those
+    # observations instead of multiplying every route by every date pair.
+    routes = list(product(destinations, origins, cabins))
     return [{
         **base,
         "origin": origin,
         "destination": destination,
-        "outboundDate": pair.outbound,
-        "returnDate": pair.returning,
+        "outboundDate": pairs[index % len(pairs)].outbound,
+        "returnDate": pairs[index % len(pairs)].returning,
         "cabin": cabin,
-        "matrixDays": pair.days,
-    } for pair, destination, origin, cabin in product(pairs, destinations, origins, cabins)]
+        "matrixDays": pairs[index % len(pairs)].days,
+    } for index, (destination, origin, cabin) in enumerate(routes)]
 
 
 def scan_page(

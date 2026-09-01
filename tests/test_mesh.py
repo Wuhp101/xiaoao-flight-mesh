@@ -57,17 +57,21 @@ class MeshTests(unittest.TestCase):
         self.assertEqual(len({(item.outbound, item.returning) for item in pairs}), 15)
         self.assertTrue(all("2026-12-19" <= item.outbound < item.returning <= "2026-12-27" for item in pairs))
 
-    def test_matrix_counts_dates_routes_and_cabins_honestly(self):
+    def test_first_sweep_covers_each_route_and_cabin_once(self):
         matrix = build_scan_matrix(PLAN)
-        self.assertEqual(len(matrix), 15 * 4 * 2 * 2)
-        first_sweep = matrix[:4 * 2 * 2]
-        self.assertEqual({item["destination"] for item in first_sweep}, {"ICN", "KIX"})
+        self.assertEqual(len(matrix), 4 * 2 * 2)
+        self.assertEqual({item["destination"] for item in matrix}, {"ICN", "KIX"})
+        self.assertEqual(len({(item["outboundDate"], item["returnDate"]) for item in matrix}), 15)
         self.assertEqual(len({query_key(item) for item in matrix}), len(matrix))
+
+    def test_production_sized_first_sweep_matches_ui_estimate(self):
+        plan = {**PLAN, "destinations": [f"D{index:02d}" for index in range(49)], "cabins": ["economy", "premium_economy", "business"]}
+        self.assertEqual(len(build_scan_matrix(plan)), 588)
 
     def test_scan_page_skips_completed_and_prioritizes_shortlist(self):
         matrix = build_scan_matrix(PLAN)
         completed = [query_key(matrix[0])]
-        priority = [query_key(matrix[20])]
+        priority = [query_key(matrix[10])]
         page = scan_page(PLAN, limit=3, completed_keys=completed, priority_keys=priority)
         self.assertEqual(query_key(page["queries"][0]), priority[0])
         self.assertNotIn(completed[0], {query_key(item) for item in page["queries"]})
