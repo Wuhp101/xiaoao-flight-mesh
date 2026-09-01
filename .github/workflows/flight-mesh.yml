@@ -24,6 +24,11 @@ jobs:
           python-version: "3.12"
       - name: Validate open-source mesh
         run: python -m unittest discover -s tests -v
+      - name: Validate NAS bootstrap scripts
+        run: |
+          sh -n deploy/synology/install-codex-xiaoao-speed-gate-v3.sh
+          sh -n deploy/synology/codex-xiaoao-gate.sh
+          sh -n deploy/synology/codex-xiaoao-deploy.sh
       - name: Check whether the private ingest bridge is configured
         id: bridge
         env:
