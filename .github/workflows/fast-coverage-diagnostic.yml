@@ -1,0 +1,98 @@
+name: Diagnose fast-flights coverage
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fast-coverage-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install 'fast-flights==3.1.0'
+      - name: Probe benchmark routes
+        run: |
+          python - <<'PY'
+          import concurrent.futures
+          import json
+          import time
+          import traceback
+          from fast_flights import FlightQuery, Passengers, create_query, get_flights
+
+          pairs = [
+              ('HKG','KIX'), ('MFM','KIX'), ('SZX','KIX'), ('CAN','KIX'),
+              ('HKG','ICN'), ('MFM','ICN'), ('SZX','ICN'), ('CAN','ICN'),
+              ('HKG','BKK'), ('MFM','BKK'), ('SZX','BKK'), ('CAN','BKK'),
+          ]
+
+          def price_of(item):
+              raw = getattr(item, 'price', None)
+              if raw is None and isinstance(item, dict):
+                  raw = item.get('price')
+              return str(raw or '')
+
+          def query(origin, destination, round_trip=True):
+              flights = [FlightQuery(date='2026-12-20', from_airport=origin, to_airport=destination)]
+              if round_trip:
+                  flights.append(FlightQuery(date='2026-12-26', from_airport=destination, to_airport=origin))
+              request = create_query(
+                  flights=flights,
+                  trip='round-trip' if round_trip else 'one-way',
+                  seat='economy',
+                  passengers=Passengers(adults=2, children=1, infants_in_seat=0, infants_on_lap=0),
+                  currency='HKD',
+                  checked_bags=0,
+                  language='zh-TW',
+              )
+              started = time.perf_counter()
+              try:
+                  result = list(get_flights(request) or [])
+                  elapsed = time.perf_counter() - started
+                  return {
+                      'route': f'{origin}-{destination}',
+                      'mode': 'round-trip' if round_trip else 'one-way',
+                      'status': 'offers' if result else 'empty',
+                      'count': len(result),
+                      'firstPrice': price_of(result[0]) if result else '',
+                      'seconds': round(elapsed, 3),
+                  }
+              except Exception as exc:
+                  elapsed = time.perf_counter() - started
+                  return {
+                      'route': f'{origin}-{destination}',
+                      'mode': 'round-trip' if round_trip else 'one-way',
+                      'status': 'error',
+                      'errorType': type(exc).__name__,
+                      'error': str(exc)[:240],
+                      'seconds': round(elapsed, 3),
+                  }
+
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+              rows = list(pool.map(lambda p: query(*p, True), pairs))
+          for row in rows:
+              print('DIAG ' + json.dumps(row, ensure_ascii=False, sort_keys=True))
+
+          empty = [(o, d) for (o, d), row in zip(pairs, rows) if row['status'] != 'offers']
+          if empty:
+              print(f'DIAG fallback_oneway_routes={len(empty)}')
+              with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                  fallback = list(pool.map(lambda p: query(*p, False), empty))
+              for row in fallback:
+                  print('DIAG ' + json.dumps(row, ensure_ascii=False, sort_keys=True))
+
+          print('DIAG summary=' + json.dumps({
+              'requested': len(rows),
+              'offers': sum(row['status'] == 'offers' for row in rows),
+              'empty': sum(row['status'] == 'empty' for row in rows),
+              'errors': sum(row['status'] == 'error' for row in rows),
+          }, sort_keys=True))
+          PY
