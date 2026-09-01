@@ -9,11 +9,11 @@ case "$action" in
   status|deploy)
     exec "$frontend"
     ;;
-  mesh-status|mesh-deploy|cloudflare-deploy|tunnel-configure)
+  mesh-status|mesh-deploy|mesh-benchmark|cloudflare-deploy|tunnel-configure)
     exec sudo -n "$root_deployer" "$action"
     ;;
   *)
-    echo "Only status, deploy, mesh-status, mesh-deploy, cloudflare-deploy and tunnel-configure are permitted." >&2
+    echo "Only status, deploy, mesh-status, mesh-deploy, mesh-benchmark, cloudflare-deploy and tunnel-configure are permitted." >&2
     exit 64
     ;;
 esac
