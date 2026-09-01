@@ -53,6 +53,10 @@ def deduplicate_offers(query: dict[str, Any], offers: Iterable[dict[str, Any]]) 
         selected = min(valid, key=lambda pair: pair[0])[1] if valid else group[0]
         comparable = [price for price, _ in valid]
         providers = sorted(set(str(item.get("provider") or item.get("source") or "unknown") for item in group))
+        verification_providers = sorted(set(
+            str(item.get("provider") or item.get("source") or "unknown")
+            for price, item in prices if price is not None
+        ))
         spread = 0.0
         if len(comparable) > 1 and min(comparable) > 0:
             spread = (max(comparable) - min(comparable)) / min(comparable)
@@ -60,10 +64,11 @@ def deduplicate_offers(query: dict[str, Any], offers: Iterable[dict[str, Any]]) 
             **selected,
             "identity": identity,
             "supportingProviders": providers,
-            "independentSourceCount": len(providers),
+            "verificationProviders": verification_providers,
+            "independentSourceCount": len(verification_providers),
             "sourcePriceSpreadPct": round(spread * 100, 2),
             "sourceConflict": spread > 0.08,
-            "verificationState": "conflict" if spread > 0.08 else "cross-checked" if len(providers) > 1 else "reference",
+            "verificationState": "conflict" if spread > 0.08 else "cross-checked" if len(verification_providers) > 1 else "reference",
         })
     return sorted(output, key=lambda item: comparable_family_price(item, passenger_count) or math.inf)
 
@@ -93,7 +98,7 @@ def classify_price_opportunity(
         (p10 is not None and price <= p10) or (median is not None and price <= median * 0.75)
     ))
     provider = str(offer.get("provider") or offer.get("source") or "")
-    sources = int(offer.get("independentSourceCount") or 1)
+    sources = int(offer.get("independentSourceCount") or 0)
     source_conflict = offer.get("sourceConflict") is True
     bookable = offer.get("bookable") is True and provider in TRUSTED_LIVE_PROVIDERS
     checked_at = str(offer.get("verifiedAt") or offer.get("fetchedAt") or "")
