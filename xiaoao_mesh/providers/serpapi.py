@@ -38,6 +38,14 @@ class SerpApiGoogleFlightsProvider:
         if payload.get("error"):
             raise RuntimeError(str(payload["error"])[:240])
         passenger_count = query["adults"] + query["children"]
+        insights = payload.get("price_insights") or {}
+        typical_range = insights.get("typical_price_range") or []
+        market_low = typical_range[0] if len(typical_range) >= 2 and isinstance(typical_range[0], (int, float)) else None
+        market_high = typical_range[1] if len(typical_range) >= 2 and isinstance(typical_range[1], (int, float)) else None
+        market_level = str(insights.get("price_level") or "").lower()
+        if market_level not in {"low", "typical", "high"}:
+            market_level = ""
+        market_source = "google-price-insights" if market_level or market_low is not None else ""
         output: list[dict[str, Any]] = []
         for offer in list(payload.get("best_flights") or []) + list(payload.get("other_flights") or []):
             flights = offer.get("flights") or []
@@ -45,6 +53,11 @@ class SerpApiGoogleFlightsProvider:
             price = offer.get("price")
             if not isinstance(price, (int, float)):
                 continue
+            offer_market_level = market_level
+            if market_low is not None and market_high is not None:
+                offer_market_level = "low" if price < market_low else "high" if price > market_high else "typical"
+            elif output:
+                offer_market_level = ""
             airline_names = list(dict.fromkeys(str(flight.get("airline") or "") for flight in flights if flight.get("airline")))
             output.append(result(
                 provider=self.name, airline="、".join(airline_names),
@@ -55,5 +68,7 @@ class SerpApiGoogleFlightsProvider:
                 source_url=str(payload.get("search_metadata", {}).get("google_flights_url") or "https://www.google.com/travel/flights"),
                 price_scope="family", tax_included=True, passenger_count=passenger_count,
                 checked_bags=query["checkedBags"], bookable=bool(offer.get("booking_token")),
+                market_price_low=market_low, market_price_high=market_high,
+                market_price_level=offer_market_level, market_price_source=market_source,
             ))
         return output[:20]

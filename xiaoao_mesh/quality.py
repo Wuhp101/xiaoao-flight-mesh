@@ -60,8 +60,12 @@ def deduplicate_offers(query: dict[str, Any], offers: Iterable[dict[str, Any]]) 
         spread = 0.0
         if len(comparable) > 1 and min(comparable) > 0:
             spread = (max(comparable) - min(comparable)) / min(comparable)
+        market = next((item for item in group if item.get("marketPriceSource") == "google-price-insights"), {})
         output.append({
             **selected,
+            **{key: market.get(key) for key in (
+                "marketPriceLow", "marketPriceHigh", "marketPriceLevel", "marketPriceSource"
+            ) if market.get(key) not in (None, "")},
             "identity": identity,
             "supportingProviders": providers,
             "verificationProviders": verification_providers,

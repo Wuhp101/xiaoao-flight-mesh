@@ -83,6 +83,38 @@ def parse_result_label(label: str, href: str = "") -> dict[str, Any] | None:
     }
 
 
+def parse_price_insights(value: str) -> dict[str, Any] | None:
+    text = " ".join(str(value or "").split())
+    chinese_level = re.search(r"目前的(?:價格|票價)(?:是|為)?\s*(偏低|較低|低|一般|正常|偏高|較高|高)", text)
+    english_level = re.search(r"prices?\s+(?:are|is)\s+currently\s+(low|typical|average|high)", text, re.I)
+    raw_level = (chinese_level.group(1) if chinese_level else english_level.group(1) if english_level else "").lower()
+    levels = {
+        "偏低": "low", "較低": "low", "低": "low", "low": "low",
+        "一般": "typical", "正常": "typical", "typical": "typical", "average": "typical",
+        "偏高": "high", "較高": "high", "高": "high", "high": "high",
+    }
+    price_level = levels.get(raw_level, "")
+    matched_range = re.search(
+        r"通常介於\s*(?:HK\$|HKD|港幣)?\s*([\d,]+)\s*(?:-|–|—|至|到)\s*(?:HK\$|HKD|港幣)?\s*([\d,]+)\s*之間",
+        text, re.I,
+    ) or re.search(
+        r"usually\s+(?:cost|range|ranges?)\s+(?:from|between)\s*(?:HK\$|HKD)?\s*([\d,]+)\s*(?:-|–|—|to|and)\s*(?:HK\$|HKD)?\s*([\d,]+)",
+        text, re.I,
+    )
+    low = int(matched_range.group(1).replace(",", "")) if matched_range else None
+    high = int(matched_range.group(2).replace(",", "")) if matched_range else None
+    if low is not None and (high is None or high <= low):
+        low, high = None, None
+    if not price_level and low is None:
+        return None
+    return {
+        "marketPriceLow": low,
+        "marketPriceHigh": high,
+        "marketPriceLevel": price_level,
+        "marketPriceSource": "google-price-insights",
+    }
+
+
 class GooglePlaywrightProvider:
     name = "google-playwright"
 
@@ -146,6 +178,9 @@ class GooglePlaywrightProvider:
                     rf"{passenger_count}\s*位乘客的價格\s*\(含稅及其他費用\)|Prices?\s+(?:shown\s+)?(?:is|are)\s+for\s+{passenger_count}\s+passengers?",
                     body, re.I,
                 ))
+                market = parse_price_insights(body) or {}
+                market_low = market.get("marketPriceLow")
+                market_high = market.get("marketPriceHigh")
                 output: list[dict[str, Any]] = []
                 seen: set[tuple[Any, ...]] = set()
                 for item in labels:
@@ -156,12 +191,20 @@ class GooglePlaywrightProvider:
                     if key in seen:
                         continue
                     seen.add(key)
+                    if market_low is not None and market_high is not None:
+                        offer_market_level = "low" if parsed["price"] < market_low else "high" if parsed["price"] > market_high else "typical"
+                    else:
+                        offer_market_level = market.get("marketPriceLevel", "") if not output else ""
                     output.append(result(
                         provider=self.name, airline=parsed["airline"], departure_time=parsed["departure_time"],
                         arrival_time=parsed["arrival_time"], duration_text=parsed["duration_text"],
                         stops=parsed["stops"], price=parsed["price"], source_url=parsed["source_url"],
                         price_scope="family" if family else "unknown", tax_included=family,
                         passenger_count=passenger_count, checked_bags=query["checkedBags"], bookable=False,
+                        market_price_low=market_low,
+                        market_price_high=market_high,
+                        market_price_level=offer_market_level,
+                        market_price_source=market.get("marketPriceSource", ""),
                     ))
                 if not output:
                     raise RuntimeError("google returned no readable flight results")

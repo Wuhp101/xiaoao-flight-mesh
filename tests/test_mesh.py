@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from xiaoao_mesh.core import challenge_page, clean_query
 from xiaoao_mesh.planner import build_scan_matrix, date_pairs, query_key, scan_page
-from xiaoao_mesh.providers.google_playwright import google_flights_url, parse_result_label
+from xiaoao_mesh.providers.google_playwright import google_flights_url, parse_price_insights, parse_result_label
 from xiaoao_mesh.quality import classify_price_opportunity, comparable_family_price, deduplicate_offers
 from xiaoao_mesh.server import configured_provider_names
 import xiaoao_mesh.server as server_module
@@ -92,6 +92,17 @@ class MeshTests(unittest.TestCase):
         self.assertEqual(parsed["airline"], "長榮航空")
         self.assertEqual(parsed["stops"], 0)
 
+    def test_google_market_price_insights_are_structured(self):
+        self.assertEqual(parse_price_insights(
+            "就你的搜尋條件而言，目前的票價一般。飛往東京都的相似行程最低航班票價通常介於 HK$29,000 - 40,000 之間。"
+        ), {
+            "marketPriceLow": 29000,
+            "marketPriceHigh": 40000,
+            "marketPriceLevel": "typical",
+            "marketPriceSource": "google-price-insights",
+        })
+        self.assertIsNone(parse_price_insights("找到 HK$4,000、HK$5,000 和 HK$6,000 三個結果"))
+
     def test_only_confirmed_family_tax_price_is_comparable(self):
         base = {"price": 7000, "passengerCount": 3, "priceScope": "family", "taxIncluded": True}
         self.assertEqual(comparable_family_price(base, 3), 7000)
@@ -112,6 +123,22 @@ class MeshTests(unittest.TestCase):
         self.assertEqual(len(offers), 1)
         self.assertTrue(offers[0]["sourceConflict"])
         self.assertEqual(offers[0]["verificationState"], "conflict")
+
+    def test_consensus_keeps_google_market_context_from_any_provider(self):
+        query = clean_query(QUERY)
+        common = {
+            "airline": "長榮航空", "departureTime": "20:10", "priceScope": "family",
+            "passengerCount": 3, "taxIncluded": True,
+        }
+        offers = deduplicate_offers(query, [
+            {**common, "provider": "google-playwright", "price": 7000},
+            {**common, "provider": "serpapi-google-flights", "price": 7050,
+             "marketPriceLow": 6800, "marketPriceHigh": 9200,
+             "marketPriceLevel": "typical", "marketPriceSource": "google-price-insights"},
+        ])
+        self.assertEqual(offers[0]["price"], 7000)
+        self.assertEqual(offers[0]["marketPriceLow"], 6800)
+        self.assertEqual(offers[0]["marketPriceLevel"], "typical")
 
     def test_fast_hint_does_not_count_as_verified_second_source(self):
         query = clean_query(QUERY)

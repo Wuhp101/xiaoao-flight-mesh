@@ -43,6 +43,9 @@ def result(
     price_scope: str = "unknown", tax_included: bool = False,
     passenger_count: int | None = None, checked_bags: int = 0,
     bookable: bool = False, airline_code: str = "",
+    market_price_low: float | int | None = None,
+    market_price_high: float | int | None = None,
+    market_price_level: str = "", market_price_source: str = "",
 ) -> dict[str, Any]:
     return {
         "provider": provider,
@@ -60,6 +63,10 @@ def result(
         "checkedBags": checked_bags,
         "bookable": bookable,
         "sourceUrl": source_url,
+        "marketPriceLow": market_price_low,
+        "marketPriceHigh": market_price_high,
+        "marketPriceLevel": market_price_level,
+        "marketPriceSource": market_price_source,
     }
 
 
