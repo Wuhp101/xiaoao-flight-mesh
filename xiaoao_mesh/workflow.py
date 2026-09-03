@@ -11,6 +11,12 @@ from .recovery import search_fast_recovery_batch
 from .server import search_batch, search_fast_batch, utc_now
 
 
+POPULAR_DESTINATIONS = (
+    "NRT", "HND", "KIX", "ICN", "GMP", "BKK", "DMK", "SIN", "TPE", "KHH",
+    "FUK", "CTS", "OKA", "PUS", "CJU", "MNL", "CEB", "KUL", "DPS", "CGK",
+)
+
+
 def request_json(url: str, token: str, data: dict | None = None) -> dict:
     body = None if data is None else json.dumps(data).encode()
     request = urllib.request.Request(url, data=body, headers={
@@ -49,16 +55,16 @@ def shortlist_searches(fast_result: dict, limit: int) -> list[dict]:
 
 def recovery_searches(searches: list[dict], fast_result: dict, limit: int) -> list[dict]:
     """Pick first-wave misses while spreading RPC recovery across destinations."""
-    completed = {
+    found = {
         query_key(row.get("input") or {})
         for row in fast_result.get("searches", [])
-        if row.get("input")
+        if row.get("input") and row.get("results")
     }
     requested = int((fast_result.get("coverage") or {}).get("requested") or len(searches))
     missing = []
     for raw in searches[:requested]:
         query = clean_query(raw)
-        if query_key(query) in completed:
+        if query_key(query) in found:
             continue
         # The fast library no longer exposes a checked-bag filter. Do not use
         # unverified hints when the user explicitly requires baggage.
@@ -88,13 +94,58 @@ def merge_discovery(primary: dict, recovery: dict | None) -> dict:
     if not recovery:
         return primary
     rows = list(primary.get("searches") or [])
-    seen = {query_key(row.get("input") or {}) for row in rows if row.get("input")}
+    positions = {query_key(row.get("input") or {}): index for index, row in enumerate(rows) if row.get("input")}
     for row in recovery.get("searches") or []:
         key = query_key(row.get("input") or {})
-        if key not in seen:
+        if key not in positions:
+            positions[key] = len(rows)
             rows.append(row)
-            seen.add(key)
+            continue
+        previous = rows[positions[key]]
+        if row.get("results") and not previous.get("results"):
+            rows[positions[key]] = row
     return {**primary, "searches": rows}
+
+
+def popular_miss_searches(searches: list[dict], discovery_result: dict, limit: int) -> list[dict]:
+    """Reserve full Google checks for popular routes that fast sources missed."""
+    outcomes = {
+        query_key(row.get("input") or {}): row
+        for row in discovery_result.get("searches", []) if row.get("input")
+    }
+    candidates = []
+    for raw in searches:
+        query = clean_query(raw)
+        if query.get("destination") not in POPULAR_DESTINATIONS:
+            continue
+        row = outcomes.get(query_key(query), {})
+        if row.get("results"):
+            continue
+        candidates.append(query)
+    candidates.sort(key=lambda query: (POPULAR_DESTINATIONS.index(query["destination"]), query["origin"], query["cabin"]))
+    selected = []
+    seen_destinations = set()
+    for query in candidates:
+        if query["destination"] in seen_destinations:
+            continue
+        selected.append(query)
+        seen_destinations.add(query["destination"])
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def verification_searches(searches: list[dict], discovery_result: dict, limit: int, popular_limit: int) -> list[dict]:
+    selected = popular_miss_searches(searches, discovery_result, min(limit, popular_limit))
+    seen = {query_key(query) for query in selected}
+    for query in shortlist_searches(discovery_result, limit):
+        if query_key(query) in seen:
+            continue
+        selected.append(query)
+        seen.add(query_key(query))
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def main() -> None:
@@ -143,8 +194,9 @@ def main() -> None:
     # blocks the first two discovery waves from appearing. Even when discovery
     # found no priced candidate, send an empty verified phase so the final page
     # can transition from `verifying` to `completed` instead of hanging forever.
-    verify_limit = max(1, min(12, int(os.getenv("FLIGHT_MESH_VERIFY_CANDIDATES", "6"))))
-    verify_searches = shortlist_searches(discovery_result, verify_limit)
+    verify_limit = max(1, min(12, int(os.getenv("FLIGHT_MESH_VERIFY_CANDIDATES", "10"))))
+    popular_limit = max(0, min(8, int(os.getenv("FLIGHT_MESH_POPULAR_RECOVERY_SEARCHES", "4"))))
+    verify_searches = verification_searches(searches, discovery_result, verify_limit, popular_limit)
     if verify_searches:
         verified_result = asyncio.run(search_batch(verify_searches))
         verified_result["phaseOf"] = "fast-discovery"
@@ -157,7 +209,7 @@ def main() -> None:
             "providers": [],
             "fetchedAt": utc_now(),
             "searches": [],
-            "coverage": {"requested": 0, "completed": 0, "failed": 0},
+            "coverage": {"requested": 0, "processed": 0, "completed": 0, "found": 0, "snapshots": 0, "noResults": 0, "failed": 0},
             "providerHealth": {},
             "snapshotsUsed": 0,
             "failures": [],

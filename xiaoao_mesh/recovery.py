@@ -6,12 +6,20 @@ from typing import Any
 
 from .core import clean_query
 from .providers import FastFlightsProvider
-from .server import utc_now
+from .server import search_coverage, utc_now
 
 
-def _candidate_row(query: dict[str, Any], offers: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _candidate_row(query: dict[str, Any], offers: list[dict[str, Any]]) -> dict[str, Any]:
     if not offers:
-        return None
+        return {
+            "input": query,
+            "provider": "faster-flights-shopping-rpc",
+            "results": [],
+            "outcome": "no-results",
+            "outcomeReason": "Google Shopping 快速補查已完成，但沒有回傳可讀價格",
+            "snapshot": False,
+            "verificationPending": True,
+        }
     fetched_at = utc_now()
     candidates = [{
         **offer,
@@ -28,6 +36,7 @@ def _candidate_row(query: dict[str, Any], offers: list[dict[str, Any]]) -> dict[
         "input": query,
         "provider": "faster-flights-shopping-rpc",
         "results": candidates[:8],
+        "outcome": "found",
         "snapshot": False,
         "verificationPending": True,
     }
@@ -46,7 +55,7 @@ async def search_fast_recovery_batch(searches: list[dict[str, Any]]) -> dict[str
     provider = FastFlightsProvider()
     failures: list[dict[str, str]] = []
 
-    async def one_query(query: dict[str, Any]) -> dict[str, Any] | None:
+    async def one_query(query: dict[str, Any]) -> dict[str, Any]:
         async with semaphore:
             try:
                 offers = await provider.search_shopping(query)
@@ -57,22 +66,25 @@ async def search_fast_recovery_batch(searches: list[dict[str, Any]]) -> dict[str
                     "query": f"{query['origin']}-{query['destination']}",
                     "error": str(error)[:240],
                 })
-                return None
+                return {
+                    "input": query,
+                    "provider": "faster-flights-shopping-rpc",
+                    "results": [],
+                    "outcome": "source-failed",
+                    "outcomeReason": str(error)[:240],
+                    "snapshot": False,
+                    "verificationPending": True,
+                }
 
     rows = await asyncio.gather(*(one_query(query) for query in cleaned))
-    completed = [row for row in rows if row]
     return {
         "ok": True,
         "mode": "fast-recovery",
         "node": os.getenv("FLIGHT_MESH_NODE", "nas"),
         "providers": ["faster-flights-shopping-rpc"],
         "fetchedAt": utc_now(),
-        "searches": completed,
-        "coverage": {
-            "requested": len(cleaned),
-            "completed": len(completed),
-            "failed": len(cleaned) - len(completed),
-        },
+        "searches": rows,
+        "coverage": search_coverage(rows),
         "snapshotsUsed": 0,
         "failures": failures[:24],
     }

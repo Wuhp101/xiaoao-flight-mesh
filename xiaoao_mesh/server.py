@@ -21,6 +21,23 @@ PROVIDER_HEALTH: dict[str, dict[str, Any]] = {}
 SNAPSHOTS = SnapshotStore()
 
 
+def search_coverage(rows: list[dict[str, Any]]) -> dict[str, int]:
+    outcomes = [str(row.get("outcome") or ("found" if row.get("results") else "no-results")) for row in rows]
+    found = sum(outcome == "found" for outcome in outcomes)
+    snapshots = sum(outcome == "snapshot" for outcome in outcomes)
+    no_results = sum(outcome == "no-results" for outcome in outcomes)
+    failed = sum(outcome == "source-failed" for outcome in outcomes)
+    return {
+        "requested": len(rows),
+        "processed": len(rows),
+        "completed": found + snapshots + no_results,
+        "found": found,
+        "snapshots": snapshots,
+        "noResults": no_results,
+        "failed": failed,
+    }
+
+
 def configured_provider_names() -> list[str]:
     value = os.getenv("FLIGHT_MESH_PROVIDERS", "google-playwright,serpapi-google-flights,fast-flights")
     allowed = {"google-playwright", "serpapi-google-flights", "fast-flights"}
@@ -96,7 +113,7 @@ async def search_fast_batch(searches: list[dict[str, Any]]) -> dict[str, Any]:
     failures: list[dict[str, str]] = []
     provider = make_provider("fast-flights")
 
-    async def one_query(query: dict[str, Any]) -> dict[str, Any] | None:
+    async def one_query(query: dict[str, Any]) -> dict[str, Any]:
         async with semaphore:
             started = time.perf_counter()
             try:
@@ -109,9 +126,25 @@ async def search_fast_batch(searches: list[dict[str, Any]]) -> dict[str, Any]:
                     "query": f"{query['origin']}-{query['destination']}",
                     "error": str(error)[:240],
                 })
-                return None
+                return {
+                    "input": query,
+                    "provider": "fast-flights",
+                    "results": [],
+                    "outcome": "source-failed",
+                    "outcomeReason": str(error)[:240],
+                    "snapshot": False,
+                    "verificationPending": True,
+                }
             if not offers:
-                return None
+                return {
+                    "input": query,
+                    "provider": "fast-flights",
+                    "results": [],
+                    "outcome": "no-results",
+                    "outcomeReason": "快速來源已完成，但沒有回傳可讀價格",
+                    "snapshot": False,
+                    "verificationPending": True,
+                }
             fetched_at = utc_now()
             candidates = []
             for offer in offers:
@@ -129,24 +162,21 @@ async def search_fast_batch(searches: list[dict[str, Any]]) -> dict[str, Any]:
                 "input": query,
                 "provider": "fast-flights",
                 "results": candidates[:8],
+                "outcome": "found",
                 "snapshot": False,
                 "verificationPending": True,
             }
 
     rows = await asyncio.gather(*(one_query(query) for query in cleaned))
-    completed = [row for row in rows if row]
+    coverage = search_coverage(rows)
     return {
         "ok": True,
         "mode": "fast-discovery",
         "node": os.getenv("FLIGHT_MESH_NODE", "nas"),
         "providers": ["fast-flights"],
         "fetchedAt": utc_now(),
-        "searches": completed,
-        "coverage": {
-            "requested": len(cleaned),
-            "completed": len(completed),
-            "failed": len(cleaned) - len(completed),
-        },
+        "searches": rows,
+        "coverage": coverage,
         "providerHealth": PROVIDER_HEALTH,
         "snapshotsUsed": 0,
         "failures": failures[:60],
@@ -183,15 +213,17 @@ async def search_batch(
     query_limit = max(1, min(12, int(os.getenv("FLIGHT_MESH_QUERY_CONCURRENCY", "4"))))
     query_semaphore = asyncio.Semaphore(query_limit)
 
-    async def one_query(query: dict[str, Any]) -> dict[str, Any] | None:
+    async def one_query(query: dict[str, Any]) -> dict[str, Any]:
         async with query_semaphore:
             combined: list[dict[str, Any]] = []
             sources: list[str] = []
+            successful_providers: list[str] = []
 
             async def call_provider(name: str, provider: Any) -> None:
                 started = time.perf_counter()
                 try:
                     offers = await provider.search(query)
+                    successful_providers.append(name)
                     combined.extend(offers)
                     if offers:
                         sources.append(name)
@@ -218,6 +250,7 @@ async def search_batch(
                     "input": query,
                     "provider": "+".join(sorted(set(sources))),
                     "results": results,
+                    "outcome": "found",
                     "snapshot": False,
                     "verificationPending": False,
                 }
@@ -236,14 +269,31 @@ async def search_batch(
                     "input": query,
                     "provider": "last-known-good-snapshot",
                     "results": cached_results,
+                    "outcome": "snapshot",
+                    "outcomeReason": "即時來源未回價，顯示最近一次成功快照",
                     "snapshot": True,
                     "verificationPending": True,
                 }
-            return None
+            # The verified path is only allowed to claim "no results" when the
+            # authoritative Google browser actually completed. A fast adapter
+            # returning an empty list must not conceal a blocked/failed Google
+            # request on popular routes.
+            source_failed = not successful_providers or (
+                "google-playwright" in names and "google-playwright" not in successful_providers
+            )
+            return {
+                "input": query,
+                "provider": "+".join(sorted(set(successful_providers))) or "+".join(names),
+                "results": [],
+                "outcome": "source-failed" if source_failed else "no-results",
+                "outcomeReason": "所有可用來源均搜尋失敗" if source_failed else "搜尋來源已完成，但沒有回傳可讀價格",
+                "snapshot": False,
+                "verificationPending": False,
+            }
 
     try:
         rows = await asyncio.gather(*(one_query(query) for query in cleaned))
-        completed = [row for row in rows if row]
+        completed = rows
     finally:
         await asyncio.gather(*(
             provider.close() for _, provider in providers if getattr(provider, "close", None)
@@ -255,11 +305,7 @@ async def search_batch(
         "providers": names,
         "fetchedAt": utc_now(),
         "searches": completed,
-        "coverage": {
-            "requested": len(cleaned),
-            "completed": len(completed),
-            "failed": len(cleaned) - len(completed),
-        },
+        "coverage": search_coverage(completed),
         "providerHealth": PROVIDER_HEALTH,
         "snapshotsUsed": sum(1 for item in completed if item.get("snapshot")),
         "failures": failures[:30],

@@ -12,7 +12,7 @@ from xiaoao_mesh.server import configured_provider_names
 import xiaoao_mesh.server as server_module
 import xiaoao_mesh.recovery as recovery_module
 from xiaoao_mesh.snapshots import SnapshotStore
-from xiaoao_mesh.workflow import merge_discovery, recovery_searches, shortlist_searches
+from xiaoao_mesh.workflow import merge_discovery, popular_miss_searches, recovery_searches, shortlist_searches, verification_searches
 
 
 QUERY = {
@@ -204,14 +204,40 @@ class MeshTests(unittest.TestCase):
         merged = merge_discovery(primary, recovery)
         self.assertEqual(len(merged["searches"]), 2)
 
+    def test_merge_discovery_replaces_empty_primary_with_recovered_price(self):
+        primary = {"searches": [{"input": QUERY, "results": [], "outcome": "no-results"}]}
+        recovery = {"searches": [{"input": QUERY, "results": [{"price": 1100}], "outcome": "found"}]}
+        merged = merge_discovery(primary, recovery)
+        self.assertEqual(merged["searches"][0]["results"][0]["price"], 1100)
+
+    def test_popular_misses_are_reserved_for_full_verification(self):
+        searches = [
+            {**QUERY, "destination": "NRT"},
+            {**QUERY, "destination": "ICN"},
+            {**QUERY, "destination": "BKK"},
+            {**QUERY, "destination": "LHR"},
+        ]
+        discovery = {"searches": [
+            {"input": clean_query(searches[0]), "results": [], "outcome": "no-results"},
+            {"input": clean_query(searches[1]), "results": [], "outcome": "source-failed"},
+            {"input": clean_query(searches[2]), "results": [{"price": 5000}], "outcome": "found"},
+            {"input": clean_query(searches[3]), "results": [], "outcome": "no-results"},
+        ]}
+        selected = popular_miss_searches(searches, discovery, 4)
+        self.assertEqual([item["destination"] for item in selected], ["NRT", "ICN"])
+        verified = verification_searches(searches, discovery, 3, 2)
+        self.assertEqual([item["destination"] for item in verified[:2]], ["NRT", "ICN"])
+
 
 class _FakeProvider:
-    def __init__(self, name, price=None, fail=False, family=True):
-        self.name, self.price, self.fail, self.family = name, price, fail, family
+    def __init__(self, name, price=None, fail=False, family=True, empty=False):
+        self.name, self.price, self.fail, self.family, self.empty = name, price, fail, family, empty
 
     async def search(self, query):
         if self.fail:
             raise RuntimeError("temporary source failure")
+        if self.empty:
+            return []
         return [{
             "provider": self.name, "source": self.name, "airline": "長榮航空",
             "departureTime": "20:10", "price": self.price,
@@ -242,6 +268,18 @@ class ServerBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["verifiedAt"], "")
         self.assertFalse(result["godPriceEligible"])
 
+    async def test_fast_batch_separates_empty_response_from_source_failure(self):
+        with patch.object(server_module, "make_provider", return_value=_FakeProvider("fast-flights", empty=True)):
+            empty = await server_module.search_fast_batch([QUERY])
+        self.assertEqual(empty["searches"][0]["outcome"], "no-results")
+        self.assertEqual(empty["coverage"]["noResults"], 1)
+        self.assertEqual(empty["coverage"]["failed"], 0)
+        with patch.object(server_module, "make_provider", return_value=_FakeProvider("fast-flights", fail=True)):
+            failed = await server_module.search_fast_batch([QUERY])
+        self.assertEqual(failed["searches"][0]["outcome"], "source-failed")
+        self.assertEqual(failed["coverage"]["noResults"], 0)
+        self.assertEqual(failed["coverage"]["failed"], 1)
+
     async def test_recovery_batch_stays_unverified_candidate(self):
         query = {**QUERY, "checkedBags": 0}
         provider = _FakeProvider("fast-flights", 6500, family=False)
@@ -267,6 +305,22 @@ class ServerBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["independentSourceCount"], 2)
         self.assertFalse(result["sourceConflict"])
         self.assertEqual(response["coverage"]["completed"], 1)
+
+    async def test_verified_empty_requires_google_to_have_completed(self):
+        providers = {
+            "google-playwright": _FakeProvider("google-playwright", empty=True),
+            "fast-flights": _FakeProvider("fast-flights", empty=True),
+        }
+        with patch.dict(os.environ, {"FLIGHT_MESH_PROVIDERS": "google-playwright,fast-flights"}), \
+                patch.object(server_module, "make_provider", side_effect=lambda name: providers[name]):
+            response = await server_module.search_batch([QUERY])
+        self.assertEqual(response["searches"][0]["outcome"], "no-results")
+
+        providers["google-playwright"] = _FakeProvider("google-playwright", fail=True)
+        with patch.dict(os.environ, {"FLIGHT_MESH_PROVIDERS": "google-playwright,fast-flights"}), \
+                patch.object(server_module, "make_provider", side_effect=lambda name: providers[name]):
+            response = await server_module.search_batch([QUERY])
+        self.assertEqual(response["searches"][0]["outcome"], "source-failed")
 
     async def test_failed_live_sources_return_snapshot_without_fresh_verification(self):
         query = clean_query(QUERY)
